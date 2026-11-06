@@ -1,0 +1,1253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1220'/%3E%3Ccircle cx='10' cy='16' r='5' fill='%237c3aed'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%232dd4bf'/%3E%3Ccircle cx='22' cy='16' r='7' fill='%232dd4bf'/%3E%3C/svg%3E">
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0c18; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; outline: none; }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Snake game"></canvas>
+<script>
+"use strict";
+/* Snake.
+   Menu:    click with the mouse, or use up/down to pick a setting, left/right to
+            change it, Tab to open the game mode list, and Space to start.
+   In game: arrow keys or WASD to steer, hold Shift to boost, P or Space to pause. */
+
+const WIDTH = 640;
+const BOARD_HEIGHT = 512;
+const HUD = 64;
+const HEIGHT = BOARD_HEIGHT + HUD;
+
+const UP = [0, -1], DOWN = [0, 1], LEFT = [-1, 0], RIGHT = [1, 0];
+// Keys go by their position on the keyboard (event.code), so letters still work
+// when the active layout types something else there (Russian, for example).
+const KEY_DIRECTIONS = {
+  ArrowUp: UP, KeyW: UP,
+  ArrowDown: DOWN, KeyS: DOWN,
+  ArrowLeft: LEFT, KeyA: LEFT,
+  ArrowRight: RIGHT, KeyD: RIGHT,
+};
+const SHIFT_KEYS = ["ShiftLeft", "ShiftRight"];
+const GAME_KEYS = new Set([...Object.keys(KEY_DIRECTIONS), ...SHIFT_KEYS, "Space", "Enter", "Tab", "Escape", "KeyP", "KeyM"]);
+
+const BACKGROUND = [15, 18, 32];
+const TEXT = [232, 236, 250];
+const MUTED = [140, 148, 180];
+const HIGHLIGHT = [38, 44, 76];
+const HOVER = [56, 64, 104];
+const ACCENT = [45, 212, 191];
+const BAR_TRACK = [30, 35, 60];
+const FOOD = [251, 191, 36];
+
+// Name: [head color, tail color]
+const SNAKE_COLORS = {
+  Teal: [[45, 212, 191], [124, 58, 237]],
+  Rose: [[251, 113, 133], [190, 24, 93]],
+  Lime: [[163, 230, 53], [22, 163, 74]],
+  Ice: [[186, 230, 253], [37, 99, 235]],
+  Mono: [[245, 245, 245], [120, 130, 150]],
+};
+// Name: [board color, grid dot color]
+const GRID_COLORS = {
+  Night: [[22, 26, 46], [44, 50, 80]],
+  Forest: [[14, 42, 30], [34, 78, 58]],
+  Ocean: [[10, 38, 62], [28, 72, 104]],
+  Wine: [[48, 16, 34], [88, 40, 66]],
+  Slate: [[36, 38, 44], [72, 76, 86]],
+  White: [[255, 255, 255], [205, 210, 220]],
+};
+// Pale snakes and yellow orbs would vanish on these boards, so here the snake
+// gets an outline and the orbs a deeper color.
+const LIGHT_GRIDS = ["White"];
+const SNAKE_OUTLINE = [30, 35, 60];
+const FOOD_ON_LIGHT = [194, 100, 0];
+// Name: [color on dark grids, deeper color on light grids]
+const ORB_COLORS = {
+  Amber: [FOOD, FOOD_ON_LIGHT],
+  Red: [[248, 82, 82], [200, 30, 30]],
+  Green: [[74, 222, 128], [22, 130, 60]],
+  Blue: [[96, 165, 250], [29, 90, 216]],
+  Pink: [[244, 114, 182], [190, 24, 120]],
+};
+const MIXED_ORBS = "Mixed"; // each orb takes one of the colors above
+const MOUTH_COLOR = [110, 20, 40];
+const MOUTH_RANGE = 3.0; // cells from an orb where the mouth starts to open
+const MOUTH_WIDEST_AT = 1.0; // cells from an orb where it is fully open
+const MOUTH_ANGLE = 55; // degrees either side of straight ahead, when fully open
+const MOUTH_SPEED = 18; // how quickly it opens and closes
+const FACE_TURN_SPEED = 16; // how quickly the eyes and mouth swing round a corner
+
+// Seconds per move. The speed stays the same for the whole game.
+const SPEEDS = { Slow: 0.20, Normal: 0.14, Fast: 0.10, Insane: 0.07 };
+// A turn pressed within this fraction of a cell after the head leaves a cell
+// center takes effect from that center, with the head curving onto the new line.
+const EARLY_TURN_WINDOW = 0.4;
+// While any other turn waits for the next cell, the snake moves this much faster.
+const TURN_RUSH = 1.5;
+
+const MODES = {
+  "Classic": "Walls and your own body end the game",
+  "No Walls": "Edges wrap around. Only your body can kill you",
+  "Zen": "Nothing ends the game. Press P for the menu",
+  "Timed": "Eat as many orbs as you can in 60 seconds",
+  "Hunger": "Eat or shrink. Get too short and you starve",
+  "Blocks": "Every orb you eat drops a new block on the board",
+};
+const MODE_NAMES = Object.keys(MODES);
+const TIMED_SECONDS = 60.0;
+const TIMER_WARNING_SECONDS = 10;
+
+const MIN_LENGTH = 3; // in Hunger, shrinking below this is starving
+const HUNGER_START_LENGTH = 6;
+const BLOCK_SAFE_DISTANCE = 3; // new blocks land at least this many cells from the head
+const BLOCK_SHARE_LIMIT = 5; // blocks stop at one cell in this many
+const BLOCK_POP_SECONDS = 0.2;
+const BLOCK_COLOR = [96, 104, 150];
+const BLOCK_ON_LIGHT = [110, 116, 135];
+const HUNGER_LOW = [248, 82, 82];
+
+const BOOST_RATE = 2; // speed multiplier while boosting
+const BOOST_DRAIN_SECONDS = 2.5; // full bar to empty
+const BOOST_REFILL_SECONDS = 8.0; // empty bar to full
+const BOOST_UNLOCK = 0.25; // after running out, the bar must refill this far
+const BOOST_PER_ORB = 0.15; // energy gained from eating an orb
+
+const ORB_COUNTS = [1, 2, 3, 5, 10, 15, 20, 30, 50];
+// With at least this many orbs on the map the pupils follow the closest one.
+// With fewer, they look where the snake is heading.
+const EYES_FOLLOW_MIN_ORBS = 5;
+const EYE_TURN_SPEED = 14; // how quickly the pupils glide to a new target
+// All the same shape as the board, so each one fills the window exactly.
+const MAPS = { Small: [15, 12], Medium: [20, 16], Large: [30, 24], Huge: [40, 32] };
+const DEFAULT_SETTINGS = {
+  speed: "Normal", orbs: 1, map: "Medium",
+  snake: "Teal", grid: "Night", orb_color: "Amber", mode: "Classic",
+};
+const MENU = [
+  ["Speed", "speed", Object.keys(SPEEDS)],
+  ["Growth orbs", "orbs", ORB_COUNTS],
+  ["Map size", "map", Object.keys(MAPS)],
+  ["Snake color", "snake", Object.keys(SNAKE_COLORS)],
+  ["Grid color", "grid", Object.keys(GRID_COLORS)],
+  ["Orb color", "orb_color", [...Object.keys(ORB_COLORS), MIXED_ORBS]],
+];
+const SAVE_KEY = "snake_save";
+
+const TAU = Math.PI * 2;
+const lerp = (a, b, t) => a + (b - a) * t;
+const mod = (a, b) => ((a % b) + b) % b; // never negative, unlike %
+const same = (a, b) => a[0] === b[0] && a[1] === b[1];
+const cellKey = (c) => c[0] + "," + c[1];
+const has = (cells, cell) => cells.some((c) => same(c, cell));
+const randomBetween = (a, b) => a + Math.random() * (b - a);
+const mixColors = (a, b, t) => [0, 1, 2].map((i) => Math.round(lerp(a[i], b[i], t)));
+
+function sample(items, count) {
+  const pool = items.slice();
+  const picked = [];
+  for (let i = 0; i < count; i++) {
+    const j = i + Math.floor(Math.random() * (pool.length - i));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+    picked.push(pool[i]);
+  }
+  return picked;
+}
+
+/** Game rules only, with no drawing, so they can be tested on their own. */
+class Snake {
+  constructor(cols, rows, orbs = 1, { wrap = false, ghost = false, hunger = null, blocks = false } = {}) {
+    this.cols = cols;
+    this.rows = rows;
+    this.orbs = orbs;
+    this.wrap = wrap; // edges lead round to the opposite side
+    this.ghost = ghost; // the snake can pass through itself
+    this.hunger = hunger; // moves without eating before losing a segment
+    this.dropsBlocks = blocks; // each orb eaten adds a solid block to the board
+    this.reset();
+  }
+
+  reset() {
+    const cx = Math.floor(this.cols / 2), cy = Math.floor(this.rows / 2);
+    const length = this.hunger ? HUNGER_START_LENGTH : MIN_LENGTH;
+    this.body = [];
+    for (let i = 0; i < length; i++) this.body.push([cx - i, cy]); // head first
+    this.blocks = new Map(); // "x,y" -> cell
+    this.newestBlock = null;
+    this.hungerMoves = 0;
+    this.shrinkFrom = null; // for drawing a shrinking tail
+    this.starved = false;
+    this.direction = RIGHT;
+    this.turns = [];
+    this.undo = null; // state before a redoable move
+    this.prevTail = this.body[this.body.length - 1]; // where the tail just left, for smooth drawing
+    this.score = 0;
+    this.alive = true;
+    this.won = false;
+    this.foods = [];
+    this._refillFoods();
+  }
+
+  _takenCells() {
+    return new Set([...this.body, ...this.foods].map(cellKey).concat([...this.blocks.keys()]));
+  }
+
+  _refillFoods() {
+    const taken = this._takenCells();
+    const free = [];
+    for (let x = 0; x < this.cols; x++) {
+      for (let y = 0; y < this.rows; y++) {
+        if (!taken.has(x + "," + y)) free.push([x, y]);
+      }
+    }
+    const missing = Math.min(this.orbs - this.foods.length, free.length);
+    if (missing > 0) this.foods.push(...sample(free, missing));
+  }
+
+  _dropBlock() {
+    if (this.blocks.size >= Math.floor(this.cols * this.rows / BLOCK_SHARE_LIMIT)) return;
+    const [hx, hy] = this.body[0];
+    const taken = this._takenCells();
+    const free = [];
+    for (let x = 0; x < this.cols; x++) {
+      for (let y = 0; y < this.rows; y++) {
+        if (!taken.has(x + "," + y) && Math.abs(x - hx) + Math.abs(y - hy) >= BLOCK_SAFE_DISTANCE) {
+          free.push([x, y]);
+        }
+      }
+    }
+    for (const cell of sample(free, Math.min(free.length, 30))) {
+      if (this._boardStaysConnected(cell)) {
+        this.newestBlock = cell;
+        this.blocks.set(cellKey(cell), cell);
+        return;
+      }
+    }
+  }
+
+  /** Would every open cell still be reachable? Otherwise an orb could be walled off. */
+  _boardStaysConnected(newBlock) {
+    const walls = new Set(this.blocks.keys());
+    walls.add(cellKey(newBlock));
+    const openCells = this.cols * this.rows - walls.size;
+    let start = null;
+    for (let x = 0; x < this.cols && !start; x++) {
+      for (let y = 0; y < this.rows && !start; y++) {
+        if (!walls.has(x + "," + y)) start = [x, y];
+      }
+    }
+    const seen = new Set([cellKey(start)]);
+    const waiting = [start];
+    while (waiting.length) {
+      const [x, y] = waiting.pop();
+      for (const near of [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]) {
+        const key = cellKey(near);
+        if (!seen.has(key) && !walls.has(key)
+            && near[0] >= 0 && near[0] < this.cols && near[1] >= 0 && near[1] < this.rows) {
+          seen.add(key);
+          waiting.push(near);
+        }
+      }
+    }
+    return seen.size === openCells;
+  }
+
+  _getHungrier() {
+    if (this.hunger === null) return;
+    this.hungerMoves += 1;
+    if (this.hungerMoves < this.hunger) return;
+    if (this.body.length <= MIN_LENGTH) {
+      this.alive = false;
+      this.starved = true;
+      return;
+    }
+    this.hungerMoves = 0;
+    this.shrinkFrom = this.prevTail;
+    this.prevTail = this.body.pop();
+  }
+
+  /** Queue a turn. Up to two are kept so quick U-turns aren't lost. */
+  turn(direction) {
+    const last = this.turns.length ? this.turns[this.turns.length - 1] : this.direction;
+    const reverse = [-last[0], -last[1]];
+    if (this.turns.length < 2 && !same(direction, last) && !same(direction, reverse)) {
+      this.turns.push(direction);
+    }
+  }
+
+  _nextCell(cell, direction) {
+    const x = cell[0] + direction[0], y = cell[1] + direction[1];
+    return this.wrap ? [mod(x, this.cols), mod(y, this.rows)] : [x, y];
+  }
+
+  _isLethal(head, body) {
+    if (head[0] < 0 || head[0] >= this.cols || head[1] < 0 || head[1] >= this.rows) return true;
+    if (this.blocks.has(cellKey(head))) return true;
+    if (this.ghost) return false;
+    // The tail moves out of its cell this step, unless the snake is growing.
+    const blocking = has(this.foods, head) ? body : body.slice(0, -1);
+    return has(blocking, head);
+  }
+
+  /** Redo the move just made in a new direction. Returns true if it did.
+      Only a straight move that ate nothing can be redone, so two turns made on
+      purpose in neighbouring cells stay two turns. A redo that would be fatal is
+      refused, leaving the ordinary turn at the next cell. */
+  retarget(direction) {
+    const reverse = [-this.direction[0], -this.direction[1]];
+    if (this.undo === null || this.turns.length || same(direction, this.direction) || same(direction, reverse)) {
+      return false;
+    }
+    const [body, prevTail, hungerMoves] = this.undo;
+    if (this._isLethal(this._nextCell(body[0], direction), body)) return false;
+    this.body = body;
+    this.prevTail = prevTail;
+    this.hungerMoves = hungerMoves;
+    this.turns = [direction];
+    this.step();
+    return true;
+  }
+
+  /** Advance one cell. Returns true if an orb was eaten. */
+  step() {
+    const before = [this.body.slice(), this.prevTail, this.hungerMoves];
+    this.shrinkFrom = null;
+    const oldDirection = this.direction;
+    if (this.turns.length) this.direction = this.turns.shift();
+    const head = this._nextCell(this.body[0], this.direction);
+    const ate = has(this.foods, head);
+
+    if (this._isLethal(head, this.body)) {
+      this.alive = false;
+      return false;
+    }
+
+    this.undo = !ate && same(this.direction, oldDirection) ? before : null;
+    this.body.unshift(head);
+    if (ate) {
+      this.score += 1;
+      this.prevTail = this.body[this.body.length - 1];
+      this.foods = this.foods.filter((food) => !same(food, head));
+      this.hungerMoves = 0;
+      if (this.dropsBlocks) this._dropBlock();
+      this._refillFoods();
+      this.won = new Set(this.body.map(cellKey)).size + this.blocks.size === this.cols * this.rows;
+    } else {
+      this.prevTail = this.body.pop();
+      this._getHungrier();
+    }
+    return ate;
+  }
+}
+
+function scoreKey(settings) {
+  const key = `${settings.speed}/${settings.orbs}/${settings.map}`;
+  return settings.mode === "Classic" ? key : `${key}/${settings.mode}`;
+}
+
+/** Returns [settings, best scores]. Anything missing or invalid gets a default. */
+function loadSave() {
+  let saved = {}, best = {};
+  try {
+    const data = JSON.parse(localStorage.getItem(SAVE_KEY));
+    if (data && typeof data.settings === "object" && data.settings) saved = data.settings;
+    if (data && typeof data.best === "object" && data.best) best = data.best;
+  } catch (error) {
+    // Storage can be blocked, and saves can be damaged. Start fresh either way.
+  }
+  const settings = { ...DEFAULT_SETTINGS };
+  for (const [, key, choices] of [...MENU, ["Mode", "mode", MODE_NAMES]]) {
+    if (choices.includes(saved[key])) settings[key] = saved[key];
+  }
+  const validBest = {};
+  for (const [key, value] of Object.entries(best)) {
+    if (Number.isInteger(value)) validBest[key] = value;
+  }
+  return [settings, validBest];
+}
+
+// Rectangles are {x, y, w, h}.
+const centeredRect = (w, h, cx, cy) => ({ x: cx - Math.floor(w / 2), y: cy - Math.floor(h / 2), w, h });
+const contains = (r, p) => p[0] >= r.x && p[0] < r.x + r.w && p[1] >= r.y && p[1] < r.y + r.h;
+const centerOf = (r) => [r.x + Math.floor(r.w / 2), r.y + Math.floor(r.h / 2)];
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const FONT_FAMILY = '"Segoe UI", Arial, "Helvetica Neue", sans-serif';
+const TITLE_FONT = `bold 44px ${FONT_FAMILY}`;
+const HUD_FONT = `bold 26px ${FONT_FAMILY}`;
+const MENU_FONT = `22px ${FONT_FAMILY}`;
+const SMALL_FONT = `18px ${FONT_FAMILY}`;
+
+const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+const rgba = (c, alpha) => `rgba(${c[0]},${c[1]},${c[2]},${alpha / 255})`;
+
+function fillCircle(color, x, y, radius) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, TAU);
+  ctx.fill();
+}
+
+function roundedPath(r, radius) {
+  const limit = Math.max(0, Math.min(radius, r.w / 2, r.h / 2));
+  ctx.beginPath();
+  ctx.moveTo(r.x + limit, r.y);
+  ctx.arcTo(r.x + r.w, r.y, r.x + r.w, r.y + r.h, limit);
+  ctx.arcTo(r.x + r.w, r.y + r.h, r.x, r.y + r.h, limit);
+  ctx.arcTo(r.x, r.y + r.h, r.x, r.y, limit);
+  ctx.arcTo(r.x, r.y, r.x + r.w, r.y, limit);
+  ctx.closePath();
+}
+
+function fillRounded(color, r, radius) {
+  ctx.fillStyle = color;
+  roundedPath(r, radius);
+  ctx.fill();
+}
+
+function fillPolygon(color, points) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (const p of points.slice(1)) ctx.lineTo(p[0], p[1]);
+  ctx.closePath();
+  ctx.fill();
+}
+
+/** Text anchored with align and baseline. maxWidth squeezes it on systems with wider fonts. */
+function drawLabel(font, text, color, x, y, align = "center", baseline = "middle", maxWidth = undefined) {
+  ctx.font = font;
+  ctx.fillStyle = rgb(color);
+  ctx.textAlign = align;
+  ctx.textBaseline = baseline;
+  ctx.fillText(text, x, y, maxWidth);
+}
+
+class App {
+  constructor() {
+    [this.settings, this.bestScores] = loadSave();
+    this.selected = 0;
+    this.modeMenuOpen = false;
+    this.modeCursor = 0;
+    this.blockPop = BLOCK_POP_SECONDS;
+    this.mouse = [-1, -1];
+    this.state = "ready"; // ready, playing, paused, over, won
+    this.accum = 0;
+    this.time = 0;
+    this.particles = [];
+    this.headCurve = null;
+    this.boostHeld = false;
+    this.boostEnergy = 1;
+    this.boostLocked = false;
+    this.applySettings();
+  }
+
+  applySettings() {
+    const [cols, rows] = MAPS[this.settings.map];
+    this.cell = WIDTH / cols;
+    const mode = this.settings.mode;
+    this.snake = new Snake(cols, rows, this.settings.orbs, {
+      wrap: mode === "No Walls" || mode === "Zen",
+      ghost: mode === "Zen",
+      // A segment per crossing of the board, so bigger maps allow more moves.
+      hunger: mode === "Hunger" ? Math.max(cols, rows) : null,
+      blocks: mode === "Blocks",
+    });
+    this.timeLeft = TIMED_SECONDS;
+    this.particles = [];
+    this._resetFace();
+  }
+
+  _resetFace() {
+    this.headCurve = null;
+    this.eating = null; // orb the head is on its way into
+    this.gaze = this.snake.direction;
+    this.facing = this.snake.direction;
+    this.mouthOpen = 0;
+  }
+
+  get onLightGrid() { return LIGHT_GRIDS.includes(this.settings.grid); }
+  get best() { return this.bestScores[scoreKey(this.settings)] || 0; }
+  get stepTime() { return SPEEDS[this.settings.speed]; }
+  get boosting() { return this.boostHeld && !this.boostLocked; }
+
+  /** The color of an orb in this cell. Mixed orbs keep theirs while they sit there. */
+  orbColorAt(cell) {
+    let name = this.settings.orb_color;
+    if (name === MIXED_ORBS) {
+      const names = Object.keys(ORB_COLORS);
+      name = names[mod(cell[0] * 7 + cell[1] * 13, names.length)];
+    }
+    return ORB_COLORS[name][this.onLightGrid ? 1 : 0];
+  }
+
+  cellCenter(cell) {
+    return [(cell[0] + 0.5) * this.cell, (cell[1] + 0.5) * this.cell + HUD];
+  }
+
+  save() {
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify({ settings: this.settings, best: this.bestScores }, null, 2));
+    } catch (error) {
+      // Failing to save shouldn't crash the game.
+    }
+  }
+
+  start() {
+    this.state = "playing";
+    this.accum = this.stepTime; // move at once, so the animation doesn't jump back
+    this.save();
+  }
+
+  _updateBoost(dt) {
+    if (this.boosting) {
+      this.boostEnergy = Math.max(0, this.boostEnergy - dt / BOOST_DRAIN_SECONDS);
+      this.boostLocked = this.boostEnergy === 0;
+    } else {
+      this.boostEnergy = Math.min(1, this.boostEnergy + dt / BOOST_REFILL_SECONDS);
+      if (this.boostEnergy >= BOOST_UNLOCK) this.boostLocked = false;
+    }
+  }
+
+  steer(direction) {
+    const progress = this._animationProgress();
+    const head = this._headCell();
+    const score = this.snake.score;
+    if (progress <= EARLY_TURN_WINDOW && this.snake.retarget(direction)) {
+      this.headCurve = [head, progress];
+      this._afterMove(this.snake.score > score);
+    } else {
+      this.snake.turn(direction);
+    }
+  }
+
+  newRound() {
+    this.snake.reset();
+    this.particles = [];
+    this._resetFace();
+    this.timeLeft = TIMED_SECONDS;
+    this.boostEnergy = 1;
+    this.boostLocked = false;
+  }
+
+  recordBest() {
+    if (this.snake.score > this.best) {
+      this.bestScores[scoreKey(this.settings)] = this.snake.score;
+      this.save();
+    }
+  }
+
+  finish(state) {
+    this.state = state;
+    this.recordBest();
+  }
+
+  openMenu() {
+    this.recordBest();
+    this.newRound();
+    this.state = "ready";
+  }
+
+  changeSetting(delta) {
+    const [, key, choices] = MENU[this.selected];
+    const index = choices.indexOf(this.settings[key]);
+    this.settings[key] = choices[mod(index + delta, choices.length)];
+    this.applySettings();
+  }
+
+  openModeMenu() {
+    this.modeMenuOpen = true;
+    this.modeCursor = MODE_NAMES.indexOf(this.settings.mode);
+  }
+
+  chooseMode(index) {
+    this.settings.mode = MODE_NAMES[index];
+    this.applySettings();
+    this.modeMenuOpen = false;
+  }
+
+  _modeMenuKey(key) {
+    const direction = KEY_DIRECTIONS[key];
+    if (direction === UP) {
+      this.modeCursor = mod(this.modeCursor - 1, MODE_NAMES.length);
+    } else if (direction === DOWN) {
+      this.modeCursor = mod(this.modeCursor + 1, MODE_NAMES.length);
+    } else if (key === "Space" || key === "Enter") {
+      this.chooseMode(this.modeCursor);
+    } else if (key === "Tab" || key === "Escape") {
+      this.modeMenuOpen = false;
+    }
+  }
+
+  handleKeyUp(key) {
+    if (SHIFT_KEYS.includes(key)) this.boostHeld = false;
+  }
+
+  handleKey(key) {
+    if (SHIFT_KEYS.includes(key)) {
+      this.boostHeld = true;
+      return;
+    }
+    const confirm = key === "Space" || key === "Enter";
+    const direction = KEY_DIRECTIONS[key];
+    if (this.state === "ready") {
+      if (this.modeMenuOpen) {
+        this._modeMenuKey(key);
+      } else if (direction === UP) {
+        this.selected = mod(this.selected - 1, MENU.length);
+      } else if (direction === DOWN) {
+        this.selected = mod(this.selected + 1, MENU.length);
+      } else if (direction === LEFT) {
+        this.changeSetting(-1);
+      } else if (direction === RIGHT) {
+        this.changeSetting(1);
+      } else if (key === "Tab") {
+        this.openModeMenu();
+      } else if (confirm) {
+        this.start();
+      }
+    } else if (this.state === "playing") {
+      if (direction) {
+        this.steer(direction);
+      } else if (key === "KeyP" || key === "Space") {
+        this.state = "paused";
+      }
+    } else if (this.state === "paused") {
+      if (key === "KeyP" || key === "Space") {
+        this.resume();
+      } else if (key === "KeyM") {
+        this.openMenu();
+      }
+    } else if (confirm) { // over or won
+      this.playAgain();
+    } else if (key === "KeyM") {
+      this.openMenu();
+    }
+  }
+
+  /** The window lost focus: the key-up would go elsewhere, and the player may be closing the tab. */
+  handleFocusLost() {
+    this.boostHeld = false;
+    this.recordBest();
+    if (this.state === "playing") this.state = "paused";
+  }
+
+  resume() { this.state = "playing"; }
+
+  playAgain() {
+    this.newRound();
+    this.start();
+  }
+
+  _rowRect(row) { return centeredRect(420, 40, WIDTH / 2, HUD + BOARD_HEIGHT / 2 - 128 + row * 42); }
+  _modeToggleRect() { return { x: WIDTH / 2 - 210, y: HUD + BOARD_HEIGHT / 2 - 192, w: 420, h: 40 }; }
+  _modeOptionRect(index) {
+    const toggle = this._modeToggleRect();
+    return { x: WIDTH / 2 - 210, y: toggle.y + toggle.h + 4 + index * 56, w: 420, h: 54 };
+  }
+  _arrowRect(row, delta) {
+    return centeredRect(44, 40, WIDTH / 2 + (delta < 0 ? 40 : 180), centerOf(this._rowRect(row))[1]);
+  }
+
+  /** The clickable buttons on the current screen: [label, area, action]. */
+  _buttons() {
+    let y, choices;
+    if (this.state === "ready") {
+      y = HUD + BOARD_HEIGHT / 2 + 208;
+      choices = [["Start (Space)", () => this.start()]]; // a web page has nothing to quit to
+    } else {
+      y = HUD + Math.floor(BOARD_HEIGHT / 3) + 32;
+      if (this.state === "paused") {
+        choices = [["Continue (P)", () => this.resume()], ["Menu (M)", () => this.openMenu()]];
+      } else if (this.state === "over" || this.state === "won") {
+        choices = [["Play again (Space)", () => this.playAgain()], ["Menu (M)", () => this.openMenu()]];
+      } else {
+        return [];
+      }
+    }
+    const sides = choices.length === 1 ? [0] : [-1, 1];
+    return choices.map(([label, action], i) => [label, centeredRect(190, 40, WIDTH / 2 + sides[i] * 100, y), action]);
+  }
+
+  handleMouseMove(pos) {
+    this.mouse = pos;
+    if (this.state === "ready" && this.modeMenuOpen) {
+      MODE_NAMES.forEach((_, index) => {
+        if (contains(this._modeOptionRect(index), pos)) this.modeCursor = index;
+      });
+    } else if (this.state === "ready") {
+      MENU.forEach((_, row) => {
+        if (contains(this._rowRect(row), pos)) this.selected = row;
+      });
+    }
+  }
+
+  handleClick(pos) {
+    this.mouse = pos;
+    if (this.state === "ready") {
+      if (this.modeMenuOpen) {
+        // An option chooses it; anywhere else just closes the list.
+        for (let index = 0; index < MODE_NAMES.length; index++) {
+          if (contains(this._modeOptionRect(index), pos)) {
+            this.chooseMode(index);
+            return;
+          }
+        }
+        this.modeMenuOpen = false;
+        return;
+      }
+      if (contains(this._modeToggleRect(), pos)) {
+        this.openModeMenu();
+        return;
+      }
+      for (let row = 0; row < MENU.length; row++) {
+        for (const delta of [-1, 1]) {
+          if (contains(this._arrowRect(row, delta), pos)) {
+            this.selected = row;
+            this.changeSetting(delta);
+            return;
+          }
+        }
+        if (contains(this._rowRect(row), pos)) {
+          this.selected = row;
+          return;
+        }
+      }
+    }
+    for (const [, rect, action] of this._buttons()) {
+      if (contains(rect, pos)) {
+        action();
+        return;
+      }
+    }
+  }
+
+  update(dt) {
+    this.time += dt;
+    for (const p of this.particles) {
+      p[0] += p[2] * dt;
+      p[1] += p[3] * dt;
+      p[4] -= dt;
+    }
+    this.particles = this.particles.filter((p) => p[4] > 0);
+    this.blockPop += dt;
+    this._updateFace(dt);
+
+    if (this.state !== "playing") return;
+    if (this.settings.mode === "Timed") {
+      this.timeLeft = Math.max(0, this.timeLeft - dt);
+      if (this.timeLeft === 0) {
+        this.finish("over");
+        return;
+      }
+    }
+
+    this._updateBoost(dt);
+    let rate = this.boosting ? BOOST_RATE : 1;
+    if (this.snake.turns.length && this.headCurve === null) {
+      rate = Math.max(rate, TURN_RUSH); // a curving head is already moving a bit faster
+    }
+    this.accum += dt * rate;
+    while (this.state === "playing" && this.accum >= this.stepTime) {
+      this.accum -= this.stepTime;
+      this.headCurve = null;
+      if (this.eating !== null) { // the head has reached the orb
+        this._burst(this.eating);
+        this.eating = null;
+      }
+      this._afterMove(this.snake.step());
+    }
+  }
+
+  /** The direction the pupils should point in, as a length-1 vector. */
+  _gazeTarget() {
+    const foods = this.snake.foods;
+    if (foods.length < EYES_FOLLOW_MIN_ORBS) return this.snake.direction;
+    const head = this._headCell();
+    let closest = null, closestSquared = Infinity;
+    for (const food of foods) {
+      const d = this._cellsBetween(head, food);
+      const squared = d[0] * d[0] + d[1] * d[1];
+      if (squared < closestSquared) {
+        closest = d;
+        closestSquared = squared;
+      }
+    }
+    const distance = Math.hypot(closest[0], closest[1]);
+    if (distance === 0) return this.snake.direction;
+    return [closest[0] / distance, closest[1] / distance];
+  }
+
+  /** The offset from start to end, taking the short way round if edges wrap. */
+  _cellsBetween(start, end) {
+    const near = this._nearestCopy(end, start);
+    return [near[0] - start[0], near[1] - start[1]];
+  }
+
+  /** On a wrapping board, the copy of cell closest to near, which may be off the board. */
+  _nearestCopy(cell, near) {
+    if (!this.snake.wrap) return cell;
+    const { cols, rows } = this.snake;
+    return [
+      cell[0] + cols * Math.round((near[0] - cell[0]) / cols),
+      cell[1] + rows * Math.round((near[1] - cell[1]) / rows),
+    ];
+  }
+
+  /** How open the mouth should be: 0 is closed, 1 is fully open. */
+  _mouthTarget() {
+    const orbs = this.eating !== null ? [...this.snake.foods, this.eating] : this.snake.foods;
+    if (!orbs.length) return 0;
+    const head = this._headCell();
+    let nearest = Infinity;
+    for (const orb of orbs) {
+      const d = this._cellsBetween(head, orb);
+      nearest = Math.min(nearest, Math.hypot(d[0], d[1]));
+    }
+    const opening = (MOUTH_RANGE - nearest) / (MOUTH_RANGE - MOUTH_WIDEST_AT);
+    return Math.max(0, Math.min(1, opening));
+  }
+
+  _updateFace(dt) {
+    const target = this._gazeTarget();
+    let amount = Math.min(1, dt * EYE_TURN_SPEED);
+    this.gaze = [lerp(this.gaze[0], target[0], amount), lerp(this.gaze[1], target[1], amount)];
+
+    this.mouthOpen = lerp(this.mouthOpen, this._mouthTarget(), Math.min(1, dt * MOUTH_SPEED));
+
+    const heading = this.snake.direction;
+    amount = Math.min(1, dt * FACE_TURN_SPEED);
+    const x = lerp(this.facing[0], heading[0], amount);
+    const y = lerp(this.facing[1], heading[1], amount);
+    const length = Math.hypot(x, y);
+    this.facing = length ? [x / length, y / length] : heading;
+  }
+
+  _afterMove(ate) {
+    if (ate) {
+      this.eating = this.snake.body[0];
+      this.blockPop = 0;
+      this.boostEnergy = Math.min(1, this.boostEnergy + BOOST_PER_ORB);
+    }
+    if (this.boosting && this.snake.alive) this._burst(this.snake.prevTail, 2);
+    if (!this.snake.alive) {
+      this.finish("over");
+    } else if (this.snake.won) {
+      this.finish("won");
+    }
+  }
+
+  _burst(cell, count = 14) {
+    const [x, y] = this.cellCenter(cell);
+    const color = rgb(this.orbColorAt(cell));
+    for (let i = 0; i < count; i++) {
+      const angle = randomBetween(0, TAU);
+      const speed = randomBetween(40, 170);
+      const life = randomBetween(0.25, 0.5);
+      this.particles.push([x, y, Math.cos(angle) * speed, Math.sin(angle) * speed, life, color]);
+    }
+  }
+
+  _animationProgress() {
+    if (this.state === "playing" || this.state === "paused") return Math.min(this.accum / this.stepTime, 1);
+    return 1;
+  }
+
+  /** Where the head is drawn, in cell coordinates. */
+  _headCell() {
+    const body = this.snake.body, t = this._animationProgress();
+    const [start, startT] = this.headCurve || [body[1], 0];
+    const along = (t - startT) / (1 - startT);
+    const end = this._nearestCopy(body[0], start);
+    return [lerp(start[0], end[0], along), lerp(start[1], end[1], along)];
+  }
+
+  /** Pixel centers from head to tail, sliding the two ends between cells.
+      On a wrapping board the path carries on past the edge instead of jumping
+      across the screen. Drawing brings it back into view. */
+  _snakePath() {
+    const body = this.snake.body, t = this._animationProgress();
+    const last = body[body.length - 1];
+    const prevTail = this.snake.prevTail, shrinkFrom = this.snake.shrinkFrom;
+    let cells;
+    if (shrinkFrom !== null && t < 0.5) {
+      // Losing a segment: the tail covers two cells this move instead of jumping.
+      const tail = [lerp(shrinkFrom[0], prevTail[0], t * 2), lerp(shrinkFrom[1], prevTail[1], t * 2)];
+      cells = [...body.slice(1), prevTail, tail];
+    } else {
+      const along = shrinkFrom !== null ? t * 2 - 1 : t;
+      const tailFrom = this._nearestCopy(prevTail, last);
+      cells = [...body.slice(1), [lerp(tailFrom[0], last[0], along), lerp(tailFrom[1], last[1], along)]];
+    }
+    const path = [this._headCell()];
+    for (const cell of cells) path.push(this._nearestCopy(cell, path[path.length - 1]));
+    return path.map((c) => this.cellCenter(c));
+  }
+
+  /** Where to draw something on a wrapping board: on it, and again if it spans an edge. */
+  _wrappedPositions(pos, margin) {
+    const x = mod(pos[0], WIDTH), y = mod(pos[1] - HUD, BOARD_HEIGHT);
+    const xs = x < margin ? [x, x + WIDTH] : x > WIDTH - margin ? [x, x - WIDTH] : [x];
+    const ys = y < margin ? [y, y + BOARD_HEIGHT] : y > BOARD_HEIGHT - margin ? [y, y - BOARD_HEIGHT] : [y];
+    const copies = [];
+    for (const a of xs) for (const b of ys) copies.push([a, b + HUD]);
+    return copies;
+  }
+
+  _drawBoard() {
+    const [boardColor, dotColor] = GRID_COLORS[this.settings.grid];
+    ctx.fillStyle = rgb(BACKGROUND);
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    ctx.fillStyle = rgb(boardColor);
+    ctx.fillRect(0, HUD, WIDTH, BOARD_HEIGHT);
+    ctx.fillStyle = rgb(dotColor);
+    ctx.beginPath();
+    for (let x = 1; x < this.snake.cols; x++) {
+      for (let y = 1; y < this.snake.rows; y++) {
+        const px = x * this.cell, py = y * this.cell + HUD;
+        ctx.moveTo(px + 1, py);
+        ctx.arc(px, py, 1, 0, TAU);
+      }
+    }
+    ctx.fill();
+  }
+
+  _drawSnake() {
+    const path = this._snakePath();
+    const spacing = Math.max(3, this.cell / 8);
+    const samples = [];
+    for (let s = 0; s + 1 < path.length; s++) {
+      const [x1, y1] = path[s], [x2, y2] = path[s + 1];
+      const count = Math.max(1, Math.floor(Math.hypot(x2 - x1, y2 - y1) / spacing));
+      for (let i = 0; i < count; i++) samples.push([lerp(x1, x2, i / count), lerp(y1, y2, i / count)]);
+    }
+    samples.push(path[path.length - 1]);
+
+    // Tail first, so the parts nearer the head are drawn on top.
+    const fullRadius = this.cell * 0.41;
+    const [headColor, tailColor] = SNAKE_COLORS[this.settings.snake];
+    const last = Math.max(1, samples.length - 1);
+    const radiusAt = (i) => {
+      // Same width along the body, narrowing only near the tail tip.
+      const taper = Math.max(0, 1 - (last - i) / 10);
+      return Math.max(1, Math.round(fullRadius * (1 - 0.4 * taper)));
+    };
+    const wrap = this.snake.wrap;
+    const circle = (color, pos, radius) => {
+      if (wrap) {
+        for (const copy of this._wrappedPositions(pos, radius)) fillCircle(color, copy[0], copy[1], radius);
+      } else {
+        fillCircle(color, pos[0], pos[1], radius);
+      }
+    };
+
+    ctx.save();
+    if (wrap) {
+      ctx.beginPath();
+      ctx.rect(0, HUD, WIDTH, BOARD_HEIGHT);
+      ctx.clip();
+    }
+    if (this.onLightGrid) {
+      const extra = Math.max(1, Math.round(this.cell / 16));
+      for (let i = 0; i <= last; i++) circle(rgb(SNAKE_OUTLINE), samples[i], radiusAt(i) + extra);
+    }
+    for (let i = last; i >= 0; i--) circle(rgb(mixColors(headColor, tailColor, i / last)), samples[i], radiusAt(i));
+
+    const heads = wrap ? this._wrappedPositions(samples[0], this.cell) : [samples[0]];
+    for (const head of heads) {
+      this._drawMouth(head, radiusAt(0));
+      this._drawEyes(head);
+    }
+    ctx.restore();
+  }
+
+  _drawMouth(head, radius) {
+    const halfAngle = (MOUTH_ANGLE * Math.PI / 180) * this.mouthOpen;
+    if (halfAngle < 4 * Math.PI / 180) return; // closed: nothing to show
+    const heading = Math.atan2(this.facing[1], this.facing[0]);
+    const points = [head]; // the hinge of the jaw, at the center of the head
+    for (let i = 0; i < 9; i++) {
+      const angle = heading - halfAngle + 2 * halfAngle * i / 8;
+      points.push([head[0] + Math.cos(angle) * radius, head[1] + Math.sin(angle) * radius]);
+    }
+    fillPolygon(rgb(MOUTH_COLOR), points);
+  }
+
+  _drawEyes(head) {
+    const [dx, dy] = this.facing;
+    const sideX = -dy, sideY = dx;
+    const forward = this.cell * -0.1, apart = this.cell * 0.19; // behind the mouth
+    const eye = Math.max(2, Math.round(this.cell * 0.17));
+    const pupil = Math.max(1, Math.round(this.cell * 0.08));
+    const reach = eye - pupil; // keeps the pupil inside the white of the eye
+    const lookX = this.gaze[0] * reach, lookY = this.gaze[1] * reach;
+    for (const side of [-1, 1]) {
+      const x = head[0] + dx * forward + sideX * apart * side;
+      const y = head[1] + dy * forward + sideY * apart * side;
+      fillCircle("rgb(245,248,255)", x, y, eye);
+      fillCircle(rgb(BACKGROUND), x + lookX, y + lookY, pupil);
+    }
+  }
+
+  _drawBlocks() {
+    const color = rgb(this.onLightGrid ? BLOCK_ON_LIGHT : BLOCK_COLOR);
+    const newest = this.snake.newestBlock;
+    for (const block of this.snake.blocks.values()) {
+      let size = this.cell * 0.86;
+      if (newest !== null && same(block, newest)) { // the newest one pops up, so it gets noticed
+        size *= Math.min(1, this.blockPop / BLOCK_POP_SECONDS);
+      }
+      const [cx, cy] = this.cellCenter(block);
+      const side = Math.round(size);
+      fillRounded(color, { x: cx - side / 2, y: cy - side / 2, w: side, h: side }, Math.max(1, Math.round(this.cell / 8)));
+    }
+  }
+
+  _drawFoods() {
+    const pulse = Math.sin(this.time * 5);
+    const scale = this.cell / 32;
+    const glowRadius = Math.max(2, Math.round((19 + 3 * pulse) * scale));
+    // An orb being eaten stays visible until the head covers it.
+    const orbs = this.eating !== null ? [...this.snake.foods, this.eating] : this.snake.foods;
+    for (const food of orbs) {
+      const color = this.orbColorAt(food);
+      const [x, y] = this.cellCenter(food);
+      fillCircle(rgba(color, 50), x, y, glowRadius);
+      fillCircle(rgb(color), x, y, Math.max(2, Math.round((10 + pulse) * scale)));
+      fillCircle(rgb(mixColors(color, [255, 255, 255], 0.7)), x - 3 * scale, y - 3 * scale, Math.max(1, Math.round(3 * scale)));
+    }
+  }
+
+  _drawParticles() {
+    for (const [x, y, , , life, color] of this.particles) {
+      fillCircle(color, x, y, Math.max(1, Math.round(life * 8)));
+    }
+  }
+
+  _settingsLabel() {
+    const { orbs, speed, map, mode } = this.settings;
+    const label = `${speed}  |  ${orbs} ${orbs === 1 ? "orb" : "orbs"}  |  ${map}`;
+    return mode === "Classic" ? label : `${mode}  |  ${label}`;
+  }
+
+  _drawHud() {
+    drawLabel(HUD_FONT, `Score  ${this.snake.score}`, TEXT, 20, HUD / 2, "left");
+    if (this.settings.mode === "Timed" && this.state !== "ready") {
+      const seconds = Math.ceil(this.timeLeft);
+      drawLabel(HUD_FONT, `${seconds}s left`, seconds <= TIMER_WARNING_SECONDS ? FOOD : TEXT, WIDTH / 2, 21);
+    } else {
+      drawLabel(SMALL_FONT, this._settingsLabel(), MUTED, WIDTH / 2, 21, "center", "middle", 340);
+    }
+    drawLabel(HUD_FONT, `Best  ${this.best}`, MUTED, WIDTH - 20, HUD / 2, "right");
+    this._drawBoostBar();
+    if (this.snake.hunger) this._drawHungerBar();
+  }
+
+  _drawHungerBar() {
+    const bar = { x: 20, y: 53, w: 110, h: 6 };
+    fillRounded(rgb(BAR_TRACK), bar, 3);
+    const fullness = 1 - this.snake.hungerMoves / this.snake.hunger;
+    const width = Math.round(bar.w * fullness);
+    if (width > 0) fillRounded(rgb(fullness <= 0.25 ? HUNGER_LOW : FOOD), { ...bar, w: width }, 3);
+  }
+
+  _drawBoostBar() {
+    const bar = centeredRect(150, 8, WIDTH / 2, 46);
+    fillRounded(rgb(BAR_TRACK), bar, 4);
+    const color = this.boostLocked ? MUTED : this.boosting ? FOOD : ACCENT;
+    const width = Math.round(bar.w * this.boostEnergy);
+    if (width > 0) fillRounded(rgb(color), { ...bar, w: width }, 4);
+  }
+
+  _drawPanel(w, h, cx, cy) {
+    ctx.fillStyle = "rgba(10,12,24," + 165 / 255 + ")";
+    ctx.fillRect(0, HUD, WIDTH, BOARD_HEIGHT);
+    fillRounded(rgba(BACKGROUND, 235), centeredRect(w, h, cx, cy), 16);
+  }
+
+  _drawMenu() {
+    const cx = WIDTH / 2, cy = HUD + BOARD_HEIGHT / 2;
+    this._drawPanel(460, 500, cx, cy);
+    drawLabel(TITLE_FONT, "Snake", TEXT, cx, cy - 218);
+    this._drawModeToggle();
+
+    MENU.forEach(([name, key], row) => {
+      const bar = this._rowRect(row);
+      const y = centerOf(bar)[1];
+      const active = row === this.selected;
+      if (active) fillRounded(rgb(HIGHLIGHT), bar, 10);
+      drawLabel(MENU_FONT, name, active ? TEXT : MUTED, cx - 195, y, "left", "middle", 124);
+      drawLabel(MENU_FONT, String(this.settings[key]), active ? ACCENT : TEXT, cx + 110, y, "center", "middle", 96);
+      this._drawSwatch(key, y);
+      for (const [delta, symbol] of [[-1, "<"], [1, ">"]]) {
+        const arrow = this._arrowRect(row, delta);
+        if (contains(arrow, this.mouse)) {
+          fillRounded(rgb(HOVER), { x: arrow.x + 3, y: arrow.y + 3, w: arrow.w - 6, h: arrow.h - 6 }, 8);
+        }
+        const center = centerOf(arrow);
+        drawLabel(MENU_FONT, symbol, active ? TEXT : MUTED, center[0], center[1]);
+      }
+    });
+
+    drawLabel(SMALL_FONT, MODES[this.settings.mode], ACCENT, cx, cy + 134, "center", "middle", 440);
+    drawLabel(SMALL_FONT, "In game: arrows or WASD to steer, hold Shift to boost", MUTED, cx, cy + 162, "center", "middle", 440);
+    this._drawButtons();
+    if (this.modeMenuOpen) this._drawModeList();
+  }
+
+  _drawModeToggle() {
+    const rect = this._modeToggleRect();
+    const center = centerOf(rect);
+    fillRounded(rgb(contains(rect, this.mouse) || this.modeMenuOpen ? HOVER : HIGHLIGHT), rect, 10);
+    drawLabel(MENU_FONT, "Game mode", TEXT, rect.x + 15, center[1], "left");
+    drawLabel(MENU_FONT, this.settings.mode, ACCENT, center[0] + 110, center[1]);
+    // An arrow showing whether the list is open.
+    const x = rect.x + rect.w - 22, y = center[1];
+    const flip = this.modeMenuOpen ? -1 : 1;
+    fillPolygon(rgb(TEXT), [[x - 7, y - 4 * flip], [x + 7, y - 4 * flip], [x, y + 5 * flip]]);
+  }
+
+  _drawModeList() {
+    // A solid backing, so the settings underneath don't show between the options.
+    const first = this._modeOptionRect(0), lastOption = this._modeOptionRect(MODE_NAMES.length - 1);
+    fillRounded(rgb(BACKGROUND), {
+      x: first.x - 4, y: first.y - 4, w: first.w + 8, h: lastOption.y + lastOption.h - first.y + 8,
+    }, 12);
+    MODE_NAMES.forEach((mode, index) => {
+      const rect = this._modeOptionRect(index);
+      const hovered = index === this.modeCursor;
+      fillRounded(rgb(hovered ? HOVER : HIGHLIGHT), rect, 10);
+      drawLabel(MENU_FONT, mode, mode === this.settings.mode ? ACCENT : TEXT, rect.x + 15, rect.y + 2, "left", "top");
+      drawLabel(SMALL_FONT, MODES[mode], hovered ? TEXT : MUTED, rect.x + 15, rect.y + rect.h - 3, "left", "bottom", 390);
+    });
+  }
+
+  /** A small preview of the chosen color, on the color rows of the menu. */
+  _drawSwatch(key, y) {
+    const area = { x: WIDTH / 2 - 68, y: y - 9, w: 76, h: 18 };
+    if (key === "snake") {
+      const [headColor, tailColor] = SNAKE_COLORS[this.settings.snake];
+      for (let x = area.x + 8; x < area.x + area.w - 8; x++) {
+        const along = (x - area.x - 8) / (area.w - 17);
+        fillCircle(rgb(mixColors(tailColor, headColor, along)), x, y, 8);
+      }
+    } else if (key === "grid") {
+      const [boardColor, dotColor] = GRID_COLORS[this.settings.grid];
+      fillRounded(rgb(boardColor), area, 4);
+      for (let x = area.x + 6; x < area.x + area.w - 2; x += 10) {
+        for (const dotY of [y - 4, y + 4]) fillCircle(rgb(dotColor), x, dotY, 1);
+      }
+      ctx.strokeStyle = rgb(dotColor);
+      ctx.lineWidth = 1;
+      roundedPath({ x: area.x + 0.5, y: area.y + 0.5, w: area.w - 1, h: area.h - 1 }, 4);
+      ctx.stroke();
+    } else if (key === "orb_color") {
+      const shown = this.settings.orb_color;
+      const names = shown === MIXED_ORBS ? Object.keys(ORB_COLORS) : [shown];
+      const shade = this.onLightGrid ? 1 : 0;
+      names.forEach((name, i) => {
+        const x = area.x + area.w / 2 + (i - (names.length - 1) / 2) * 15;
+        fillCircle(rgb(ORB_COLORS[name][shade]), x, y, 7);
+      });
+    }
+  }
+
+  _drawButtons() {
+    for (const [label, rect] of this._buttons()) {
+      fillRounded(rgb(contains(rect, this.mouse) ? HOVER : HIGHLIGHT), rect, 10);
+      const center = centerOf(rect);
+      drawLabel(SMALL_FONT, label, TEXT, center[0], center[1], "center", "middle", rect.w - 10);
+    }
+  }
+
+  _drawOverlay() {
+    if (this.state === "ready") {
+      this._drawMenu();
+      return;
+    }
+    const titles = { paused: "Paused", over: "Game over", won: "You filled the board!" };
+    if (!(this.state in titles)) return;
+    // Kept in the upper part of the board so more of the snake stays visible.
+    const cx = WIDTH / 2, cy = HUD + Math.floor(BOARD_HEIGHT / 3);
+    this._drawPanel(460, 130, cx, cy);
+    let title = titles[this.state];
+    if (this.state === "over" && this.settings.mode === "Timed" && this.timeLeft === 0) {
+      title = "Time's up!";
+    } else if (this.state === "over" && this.snake.starved) {
+      title = "Starved!";
+    }
+    drawLabel(TITLE_FONT, title, TEXT, cx, cy - 22, "center", "middle", 440);
+    this._drawButtons();
+  }
+
+  draw() {
+    this._drawBoard();
+    this._drawBlocks();
+    this._drawFoods();
+    this._drawSnake();
+    this._drawParticles();
+    this._drawHud();
+    this._drawOverlay();
+  }
+}
+
+// Fill the window while keeping the game's shape, and stay sharp on high-density screens.
+let viewScale = 1;
+function resize() {
+  const fit = Math.min(window.innerWidth / WIDTH, window.innerHeight / HEIGHT);
+  const cssWidth = Math.floor(WIDTH * fit), cssHeight = Math.floor(HEIGHT * fit);
+  const density = window.devicePixelRatio || 1;
+  canvas.style.width = cssWidth + "px";
+  canvas.style.height = cssHeight + "px";
+  canvas.width = Math.round(cssWidth * density);
+  canvas.height = Math.round(cssHeight * density);
+  viewScale = canvas.width / WIDTH;
+}
+
+function mousePosition(event) {
+  const box = canvas.getBoundingClientRect();
+  return [(event.clientX - box.left) * WIDTH / box.width, (event.clientY - box.top) * HEIGHT / box.height];
+}
+
+const app = new App();
+
+window.addEventListener("resize", resize);
+window.addEventListener("mousemove", (event) => app.handleMouseMove(mousePosition(event)));
+canvas.addEventListener("mousedown", (event) => {
+  if (event.button === 0) app.handleClick(mousePosition(event));
+});
+window.addEventListener("keydown", (event) => {
+  if (event.ctrlKey || event.metaKey || event.altKey || !GAME_KEYS.has(event.code)) return;
+  event.preventDefault(); // otherwise arrows and Space scroll the page, and Tab leaves the game
+  if (!event.repeat) app.handleKey(event.code);
+});
+window.addEventListener("keyup", (event) => app.handleKeyUp(event.code));
+window.addEventListener("blur", () => app.handleFocusLost());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) app.handleFocusLost();
+});
+window.addEventListener("pagehide", () => app.recordBest()); // quitting mid-game still counts
+
+let lastFrame = performance.now();
+function frame(now) {
+  // Cap dt so a stalled tab can't make the snake jump several cells.
+  const dt = Math.min(Math.max(0, now - lastFrame) / 1000, 0.1);
+  lastFrame = now;
+  app.update(dt);
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  app.draw();
+  requestAnimationFrame(frame);
+}
+
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
